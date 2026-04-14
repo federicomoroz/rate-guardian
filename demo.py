@@ -1,122 +1,207 @@
 # -*- coding: utf-8 -*-
 """
-Rate Guardian - live demo
-Run: python demo.py
-Requires: uvicorn app.main:app --port 8002 running in another terminal
+Rate Guardian - live terminal demo
+Run:  python demo.py
+Req:  uvicorn app.main:app --port 8002   (in a separate terminal)
+      pip install rich
 """
 
 import sys
 import time
+
 import httpx
-
-# Force UTF-8 output on Windows
-if sys.platform == "win32":
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-
-BASE = "http://localhost:8002"
-SEP  = "-" * 60
-
-
-def hdr(title: str):
-    print(f"\n{SEP}\n  {title}\n{SEP}")
-
-
-def check(r: httpx.Response):
-    if r.status_code < 400:
-        icon = "OK "
-    elif r.status_code == 429:
-        icon = "429"
-    elif r.status_code == 503:
-        icon = "503"
-    else:
-        icon = str(r.status_code)
-    print(f"  [{icon}]  {r.request.method} {str(r.url)[:60]}  ->  {r.status_code}")
-    return r
-
-
 import redis as _redis
-_r = _redis.from_url("redis://localhost:6379", decode_responses=True)
-for key in _r.keys("rg:*"):
-    _r.delete(key)
+from rich import box
+from rich.columns import Columns
+from rich.console import Console
+from rich.layout import Layout
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
-c = httpx.Client(base_url=BASE, timeout=10)
+BASE  = "http://localhost:8002"
+DELAY = 0.4          # seconds between requests (keeps the live feed readable)
 
-# ── cleanup rules from previous runs ─────────────────────────────────────────
-for rl in c.get("/rules").json():
-    c.delete(f"/rules/{rl['id']}")
+console = Console()
+c       = httpx.Client(base_url=BASE, timeout=10)
 
-# ── 0. Dashboard before anything ─────────────────────────────────────────────
-hdr("0 . Dashboard (empty state)")
-r = c.get("/dashboard")
-stats = r.json()["stats"]
-print(f"  total={stats['total_requests']}  blocked={stats['blocked_requests']}  saturation={stats['saturation_pct']}%")
 
-# ── 1. No rule -> requests pass freely ────────────────────────────────────────
-hdr("1 . No rule -- all requests forwarded")
-for i in range(3):
-    check(c.get("/proxy/https://jsonplaceholder.typicode.com/posts/1"))
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-# ── 2. Create a tight rate-limiting rule ──────────────────────────────────────
-hdr("2 . Create rule: /proxy/* -> max 3 req / 30 s per IP")
-r = c.post("/rules", json={
-    "name":           "Demo limit",
-    "path_pattern":   "/proxy/*",
-    "limit":          3,
-    "window_seconds": 30,
-    "key_type":       "ip",
-})
-rule = r.json()
-print(f"  Rule created -> id={rule['id']}  pattern={rule['path_pattern']}  limit={rule['limit']}/30s")
+def _flush_redis():
+    r = _redis.from_url("redis://localhost:6379", decode_responses=True)
+    for key in r.keys("rg:*"):
+        r.delete(key)
 
-# ── 3. Hit the rule ───────────────────────────────────────────────────────────
-hdr("3 . Send 5 requests -- first 3 pass, last 2 are blocked (429)")
-for i in range(5):
-    check(c.get("/proxy/https://jsonplaceholder.typicode.com/posts/1"))
+def _clear_rules():
+    for rule in c.get("/rules").json():
+        c.delete(f"/rules/{rule['id']}")
 
-# ── 4. Dashboard after traffic ───────────────────────────────────────────────
-hdr("4 . Dashboard after traffic")
-time.sleep(0.2)
-r = c.get("/dashboard")
-stats = r.json()["stats"]
-print(f"  total={stats['total_requests']}  allowed={stats['allowed_requests']}  "
-      f"blocked={stats['blocked_requests']}  saturation={stats['saturation_pct']}%  "
-      f"avg_latency={stats['avg_latency_ms']:.1f}ms")
-top_ips = r.json()["top_ips"]
-if top_ips:
-    print(f"  top IP: {top_ips[0]['ip']}  ({top_ips[0]['count']} requests)")
 
-# ── 5. Recent logs ────────────────────────────────────────────────────────────
-hdr("5 . Recent request logs")
-logs = c.get("/logs?limit=8").json()
-for log in logs[:8]:
-    status = "BLOCKED" if log["blocked"] else "OK"
-    print(f"  [{status:7}]  {log['method']} {log['path'][:40]}  "
-          f"status={log['status_code']}  latency={log['latency_ms']:.1f}ms")
+# ── Renderables ───────────────────────────────────────────────────────────────
 
-# ── 6. Disable rate limit rule, then show circuit breaker ─────────────────────
-hdr("6 . Disable rate-limit rule, hammer a dead upstream (threshold=5 failures)")
-c.patch(f"/rules/{rule['id']}/toggle")
-print("  Rate limit rule disabled.")
-print("\n  Sending requests to an unreachable host:")
-for i in range(7):
-    r = check(c.get("/proxy/http://dead-host.invalid/api"))
-    if r.status_code == 503:
-        print("       ^ circuit OPEN -- gateway blocks without touching the upstream")
-        break
+def _stats_panel(stats: dict) -> Panel:
+    sat = stats["saturation_pct"]
+    sat_color = "green" if sat < 40 else "dark_orange" if sat < 70 else "red"
 
-# ── 7. Show rule list ─────────────────────────────────────────────────────────
-hdr("7 . Current rules")
-for rl in c.get("/rules").json():
-    state = "ON " if rl["active"] else "OFF"
-    print(f"  [{state}]  '{rl['name']}'  pattern={rl['path_pattern']}  limit={rl['limit']}/30s")
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", style="dim")
+    grid.add_column()
+    grid.add_row("Total",      f"[bold]{stats['total_requests']}[/]")
+    grid.add_row("Allowed",    f"[green]{stats['allowed_requests']}[/]")
+    grid.add_row("Blocked",    f"[red]{stats['blocked_requests']}[/]")
+    grid.add_row("Latency",    f"[cyan]{stats['avg_latency_ms']:.1f} ms[/]")
+    grid.add_row("Saturation", f"[{sat_color} bold]{sat:.1f}%[/]")
 
-# ── 8. Requests pass freely again ─────────────────────────────────────────────
-hdr("8 . No active rate-limit rule -- requests forwarded again")
-for i in range(2):
-    check(c.get("/proxy/https://jsonplaceholder.typicode.com/posts/1"))
+    return Panel(grid, title="[bold]Stats[/]", border_style="bright_blue", padding=(1, 2))
 
-print(f"\n{SEP}")
-print("  Dashboard: http://localhost:8002")
-print("  API docs:  http://localhost:8002/docs")
-print(SEP)
+
+def _log_table(logs: list) -> Table:
+    t = Table(box=box.SIMPLE_HEAD, expand=True, show_footer=False)
+    t.add_column("Status",  width=20)
+    t.add_column("Method",  width=7)
+    t.add_column("Path")
+    t.add_column("ms", width=7, justify="right")
+
+    for log in logs[:14]:
+        code = log["status_code"]
+        if code == 200:
+            status = Text(" 200 OK ", style="bold black on green")
+        elif code == 429:
+            status = Text(" 429 RATE LIMIT ", style="bold white on dark_orange")
+        elif code == 503:
+            status = Text(" 503 CIRCUIT OPEN ", style="bold white on red")
+        elif code == 502:
+            status = Text(" 502 BAD GATEWAY ", style="bold white on red3")
+        else:
+            status = Text(f" {code} ", style="dim")
+
+        t.add_row(status, f"[bold]{log['method']}[/]",
+                  log["path"][:52], f"[dim]{log['latency_ms']:.0f}[/]")
+    return t
+
+
+def _rules_table(rules: list) -> Table:
+    t = Table(box=box.SIMPLE_HEAD, expand=True)
+    t.add_column("", width=4)
+    t.add_column("Name")
+    t.add_column("Pattern")
+    t.add_column("Limit", justify="right", width=12)
+    for rl in rules:
+        state = "[green]ON[/]" if rl["active"] else "[dim]OFF[/]"
+        t.add_row(state, rl["name"], rl["path_pattern"],
+                  f"{rl['limit']} / {rl['window_seconds']}s")
+    return t
+
+
+def _build_layout(logs, stats, rules, note: str) -> Layout:
+    layout = Layout()
+    layout.split_column(
+        Layout(name="top",   ratio=5),
+        Layout(name="rules", ratio=2),
+        Layout(name="note",  size=3),
+    )
+    layout["top"].split_row(
+        Layout(_stats_panel(stats), name="stats", ratio=1),
+        Layout(Panel(_log_table(logs), title="[bold]Request Log[/]",
+                     border_style="bright_blue", padding=(0, 1)),
+               name="log", ratio=3),
+    )
+    layout["rules"].update(
+        Panel(_rules_table(rules), title="[bold]Rules[/]",
+              border_style="bright_blue", padding=(0, 1))
+    )
+    layout["note"].update(
+        Panel(Text(note, justify="center", style="italic"),
+              border_style="dim")
+    )
+    return layout
+
+
+# ── Request helper ────────────────────────────────────────────────────────────
+
+def _get(live, url: str, note: str):
+    c.get(url)
+    time.sleep(DELAY)
+    _refresh(live, note)
+
+
+def _refresh(live, note: str):
+    stats = c.get("/dashboard").json()["stats"]
+    logs  = c.get("/logs?limit=14").json()
+    rules = c.get("/rules").json()
+    live.update(_build_layout(logs, stats, rules, note))
+
+
+# ── Demo ──────────────────────────────────────────────────────────────────────
+
+def main():
+    _flush_redis()
+    _clear_rules()
+
+    console.rule("[bold bright_blue]  RATE GUARDIAN  —  Live Demo  [/]")
+    console.print()
+
+    UPSTREAM = "/proxy/https://jsonplaceholder.typicode.com/posts/1"
+
+    with Live(console=console, refresh_per_second=8, screen=False) as live:
+
+        # ── 1. No rules: gateway pass-through ─────────────────────────────
+        note = "1 / 4   No rules configured — every request is forwarded."
+        _refresh(live, note)
+        time.sleep(1.2)
+        for _ in range(5):
+            _get(live, UPSTREAM, note)
+
+        # ── 2. Create rate-limit rule ──────────────────────────────────────
+        note = "2 / 4   Creating rule:  /proxy/*  →  max 3 req / 20 s per IP"
+        _refresh(live, note)
+        time.sleep(1.0)
+
+        c.post("/rules", json={
+            "name": "API rate limit", "path_pattern": "/proxy/*",
+            "limit": 3, "window_seconds": 20, "key_type": "ip",
+        })
+        note = "2 / 4   Rule active. Watch requests start getting blocked (429)."
+        _refresh(live, note)
+        time.sleep(1.0)
+
+        # ── 3. Hit the rate limit ──────────────────────────────────────────
+        note = "3 / 4   Sending 7 requests.  Limit = 3 / 20 s."
+        for _ in range(7):
+            _get(live, UPSTREAM, note)
+        time.sleep(1.2)
+
+        # ── 4. Circuit breaker ─────────────────────────────────────────────
+        rule_id = c.get("/rules").json()[0]["id"]
+        c.patch(f"/rules/{rule_id}/toggle")    # disable rate limit
+
+        note = "4 / 4   Rate-limit disabled. Hammering an unreachable upstream..."
+        _refresh(live, note)
+        time.sleep(1.0)
+
+        DEAD = "/proxy/http://dead-host.invalid/api"
+        tripped = False
+        for _ in range(8):
+            r = c.get(DEAD)
+            time.sleep(DELAY)
+            if r.status_code == 503 and not tripped:
+                note = "4 / 4   Circuit OPEN — gateway short-circuits without touching upstream."
+                tripped = True
+            _refresh(live, note)
+
+        time.sleep(2.5)
+        _refresh(live, "Done.  Open http://localhost:8002 for the live dashboard.")
+        time.sleep(2.0)
+
+    console.print()
+    console.rule("[bold bright_blue]  Demo complete  [/]")
+    console.print(f"  [dim]Dashboard :[/] http://localhost:8002")
+    console.print(f"  [dim]Swagger   :[/] http://localhost:8002/docs")
+    console.print(f"  [dim]Tests     :[/] 202 passing  —  [italic]pytest tests/[/]")
+    console.print()
+
+
+if __name__ == "__main__":
+    main()

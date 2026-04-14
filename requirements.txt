@@ -6,3 +6,4 @@ sqlalchemy==2.0.40
 pydantic==2.11.3
 apscheduler==3.10.4
 aiofiles==24.1.0
+rich>=13.0
