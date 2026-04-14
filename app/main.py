@@ -20,8 +20,6 @@ from app.models.services.rate_limiter import SlidingWindowRateLimiter
 
 logging.basicConfig(level=logging.INFO)
 
-Base.metadata.create_all(bind=engine)
-
 scheduler = BackgroundScheduler()
 
 
@@ -35,6 +33,8 @@ def _purge_logs_job():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+
     # ── Shared transport layer ────────────────────────────────────────────────
     http_client  = httpx.AsyncClient(timeout=15.0)
     redis_client = get_redis()
