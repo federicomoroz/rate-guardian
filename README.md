@@ -92,6 +92,34 @@ Client request
 
 ---
 
+## Live Demo
+
+Run the animated terminal demo to see rate limiting and the circuit breaker in action — no manual curl commands needed.
+
+**Terminal 1 — start the gateway:**
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --port 8002
+```
+
+**Terminal 2 — run the demo:**
+```bash
+python demo.py
+```
+
+The demo runs four scenes automatically:
+
+| Scene | What happens |
+|-------|-------------|
+| 1 — Pass-through | No rules configured; every request returns `200 OK` |
+| 2 — Rule created | A rule is added: `/proxy/*` → max 3 requests / 20 s per IP |
+| 3 — Rate limited | 7 requests sent; first 3 pass, the rest return `429 Rate Limit` |
+| 4 — Circuit breaker | Rate limit disabled; gateway hammers an unreachable host until the circuit opens (`503 Circuit Open`) |
+
+The layout refreshes in real time: a stats panel (total / allowed / blocked / latency / saturation), a live request log with colour-coded status codes, the active rules table, and a scene description bar at the bottom.
+
+---
+
 ## Running Locally
 
 **Prerequisites:** Python 3.11+, Redis running on `localhost:6379`
