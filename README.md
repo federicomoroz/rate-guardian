@@ -92,12 +92,24 @@ Client request
 
 ---
 
+## Quick start (Docker)
+
+```bash
+docker compose up --build
+```
+
+Opens the gateway on `http://localhost:8002`. PostgreSQL and Redis are provisioned automatically.
+
+---
+
 ## Live Demo
 
 Run the animated terminal demo to see rate limiting and the circuit breaker in action — no manual curl commands needed.
 
 **Terminal 1 — start the gateway:**
 ```bash
+docker compose up --build
+# or locally:
 pip install -r requirements.txt
 uvicorn app.main:app --port 8002
 ```
@@ -122,10 +134,11 @@ The layout refreshes in real time: a stats panel (total / allowed / blocked / la
 
 ## Running Locally
 
-**Prerequisites:** Python 3.11+, Redis running on `localhost:6379`
+**Prerequisites:** Python 3.11+, PostgreSQL, Redis
 
 ```bash
 pip install -r requirements.txt
+cp .env.example .env   # set DATABASE_URL and REDIS_URL if needed
 uvicorn app.main:app --port 8002 --reload
 ```
 
@@ -188,8 +201,8 @@ Set via environment variables or `.env`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/rate_guardian` | PostgreSQL connection string |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
-| `DATABASE_URL` | `sqlite:///./rate_guardian.db` | SQLAlchemy DB URL |
 | `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `5` | Failures before circuit opens |
 | `CIRCUIT_BREAKER_RECOVERY_SECONDS` | `30` | Seconds before half-open probe |
 | `LOG_RETENTION_DAYS` | `7` | Days to keep request logs |
